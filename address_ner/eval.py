@@ -9,7 +9,6 @@ from transformers import AutoTokenizer
 from transformers import DataCollatorForTokenClassification
 from transformers import AutoModelForTokenClassification, TrainingArguments, Trainer
 
-from address_ner import mlflow_logger
 from address_ner.logger import get_logger
 from address_ner.utils import metric, task, compute_metrics, compute_metrics_summary, evaluate, tokenize_and_align_labels
 
@@ -94,7 +93,7 @@ def run(
         tokenized_datasets["test"].shard(downsample,0),
         label_list
     )
-    logger.info(f"Test metrics\n\t{val_metrics}")
+    logger.info(f"Test metrics\n\t{test_metrics}")
 
     metrics = {}
     for metric in val_metrics:
@@ -112,13 +111,13 @@ def run(
         "label_all_tokens": label_all_tokens
     }
 
-    logger.info(f"Logging to MLFlow...")
-    mlflow_logger.log(
-        model=model,
-        tokenizer=tokenizer,
-        metrics=metrics,
-        parameters=parameters
-    )
+    # logger.info(f"Logging to MLFlow...")
+    # mlflow_logger.log(
+    #     model=model,
+    #     tokenizer=tokenizer,
+    #     metrics=metrics,
+    #     parameters=parameters
+    # )
 
 
 if __name__ == "__main__":

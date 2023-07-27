@@ -1,6 +1,5 @@
 import re
 import random
-from joblib import Parallel, delayed
 from itertools import chain
 from collections import defaultdict
 from typing import List
@@ -13,8 +12,8 @@ from datasets import Sequence, ClassLabel
 import numpy as np
 import spacy
 from spacy.training import offsets_to_biluo_tags, biluo_tags_to_spans
-from conny_ml.extraction.entities.utils import resolve_overlap, align_entities
 
+from address_ner.utils import resolve_overlap, align_entities
 from address_ner.address_generator import AddressGenerator
 from address_ner.logger import get_logger
 
@@ -66,25 +65,47 @@ def _sample_n_characters(character_distribution=(50,5), minimum=10):
     return max(int(random.gauss(*character_distribution)), minimum)
 
 
-def make_samples(text, character_distribution=(50, 5), generator=None, random_state=42):
-    """
-    process:
+def synthesize_samples(datum, character_distribution=(50, 5), generator=None):
+    """Convert one text into many NER samples, each with exactly one entity
+
+    Process
+    -------
         - split text by \n
         - remove lines that are "address-like"
         - collect lines into lists until length is just longer than a sampled character limit
         - generate an address for each list
         - insert address uniformly at random each list
         - randomly join each list of lines with \n and \s
-    """
-    random.seed(random_state)
 
-    lines = text.split("\n")
+    Parameters
+    ----------
+    datum : dict
+        "text": str
+
+    character_distribution : tuple(int, int)
+    generator : AddressGenerator
+    random_state : int
+
+    Returns
+    -------
+    list[dict]
+        where each dict has:
+            "text": str
+            "entities": list[dict]
+                where each dict has:
+                    "text": str
+                    "begin": int
+                    "end": int
+                    "label": str
+    """
+
+    lines = datum["text"].split("\n")
     lines = [line for line in lines if not _has_address(line)]
 
     if len(lines) == 0:
         return []
 
-    # split into reasonable sum-samples
+    # split into reasonable sub-samples
     samples = []
     sample = []
     length = _sample_n_characters(character_distribution)
@@ -100,7 +121,7 @@ def make_samples(text, character_distribution=(50, 5), generator=None, random_st
     if sample:
         samples.append(sample)
 
-    # generate addresses and insert uniformly at random
+    # generate ONE address entity per sample and insert uniformly at random between lines
     entities = []
     for sample in samples:
         address = generator()
@@ -126,12 +147,40 @@ def make_samples(text, character_distribution=(50, 5), generator=None, random_st
 
         samples[i] = sample_text
 
-
     # sanity check
     for ent, sample in zip(entities, samples):
         assert sample[ent["begin"]:ent["end"]] == ent["text"]
 
-    return list(zip(samples, entities))
+    output = []
+    for sample, entity in zip(samples, entities):
+        output.append(
+            {
+                "text": sample,
+                "entities": [entity]
+            }
+        )
+    return output
+
+
+def batch_synthesize_samples(batch, **kwargs):
+    """batch-aware version of the main sample synthesis function
+
+    Parameters
+    ----------
+    batch : dict
+        "text": iterable of str
+
+    Returns
+    -------
+    dict
+        "text": iterable of str
+        "entities": iterable of dict
+    """
+    batch_samples = []
+    for datum in batch["text"]:
+        batch_samples += synthesize_samples({"text":datum}, **kwargs)
+
+    return _flatten_dicts(batch_samples)
 
 
 def _get_spacy_model(model="de_core_news_sm"):
@@ -162,8 +211,8 @@ def sample_to_conll(sample, nlp=None, scheme="IOB", output_key="ner_tags"):
     assert scheme in ["IOB", "BILUO"]
 
     nlp = nlp or _get_spacy_model(model="de_core_news_sm")
-    doc = nlp(sample[0])
-    doc_ents = align_entities([sample[1]], doc)
+    doc = nlp(sample["text"])
+    doc_ents = align_entities(sample["entities"], doc)
     doc_ents = resolve_overlap(doc_ents)
 
     tags = offsets_to_biluo_tags(doc, [(e["begin"], e["end"], e["label"]) for e in doc_ents])
@@ -179,13 +228,12 @@ def sample_to_conll(sample, nlp=None, scheme="IOB", output_key="ner_tags"):
     return {"tokens": toks, output_key: tags}
 
 
-def _batch_to_conll(batch, scheme="IOB", output_key="ner_tags"):
-    nlp = _get_spacy_model(model="de_core_news_sm")
-
-    results = []
-    for datum in batch:
-        results.append(sample_to_conll(datum, nlp=nlp, scheme=scheme, output_key=output_key))
-    return results
+def _get_labels(dataset, feature_name="ner_tags"):
+    labels = list(set(chain(*dataset.map(lambda sample: {"labels": list(set(sample[feature_name]))})["labels"])))
+    labels.remove("O")
+    labels.sort(key=lambda label: label[::-1])
+    labels = ["O"] + labels
+    return labels
 
 
 def _flatten_dicts(dicts):
@@ -198,69 +246,64 @@ def _flatten_dicts(dicts):
     return dict(out)
 
 
-def _get_labels(dataset, feature_name="ner_tags"):
-    labels = list(set(chain(*dataset.map(lambda sample: {"labels": list(set(sample[feature_name]))})["labels"])))
-    labels.remove("O")
-    labels.sort(key=lambda label: label[::-1])
-    labels = ["O"] + labels
-    return labels
-
-
 def _make_dataset(
     dataset_path: str,
     address_generator: AddressGenerator,
     character_distribution: List[int],
     split: str,
     labels: List[str]=None,
-    n_workers: int=8,
     limit: int=None,
     feature_name: str="ner_tags",
+    n_workers: int=8,
     logger=None
 ):
 
     if logger:
         logger.info(f"Gathering {split.upper()} data from {dataset_path}")
 
+    dataset = datasets.load_from_disk(str(dataset_path))
+
     if limit is not None:
         if logger:
             logger.info(f"Limiting {split.upper()} split to {limit} samples")
 
-        dataset = datasets.load_dataset(
-            "json",
-            data_files={split:str(dataset_path)},
-            split=f'{split}[:{limit}]'
-        )
-    else:
-        dataset = datasets.load_dataset(
-            "json",
-            data_files={split:str(dataset_path)},
-        )
+        dataset = dataset.select(range(limit))
 
     # generate addresses for each text
-    dataset = Parallel(n_jobs=n_workers)(delayed(make_samples)(
-        datum["text"],
-        character_distribution,
-        address_generator.sample) for datum in dataset)
+    if logger:
+        logger.info(f"Synthesizing {split.upper()} data...")
 
-    # flatten into list of objects
-    dataset = list(chain(*dataset))
+    dataset = dataset.map(
+        batch_synthesize_samples,
+        batched=True,
+        fn_kwargs={
+            "character_distribution":character_distribution,
+            "generator": address_generator.sample,
+        },
+        num_proc=n_workers
+    )
 
-    # batch and convert to conll
-    dataset = np.array_split(dataset, n_workers)
-    _batched_fn = partial(_batch_to_conll, output_key=feature_name)
-    dataset = Parallel(n_jobs=n_workers)(delayed(_batched_fn)(batch) for batch in dataset)
+    # convert to conll format
+    if logger:
+        logger.info(f"Converting {split.upper()} data to CoNLL format...")
 
-    # flatten into list of objects
-    dataset = list(chain(*dataset))
-
-    # convert to huggingface dataset
-    dataset = datasets.Dataset.from_dict(_flatten_dicts(dataset))
+    dataset = dataset.map(
+        sample_to_conll,
+        remove_columns=["text", "entities"],
+        fn_kwargs={
+            "nlp": _get_spacy_model(model="de_core_news_sm")
+        },
+        num_proc=n_workers
+    )
 
     # use integers instead of strings for class names
+    if logger:
+        logger.info(f"Mapping {split.upper()} label names...")
+
     labels = labels or _get_labels(dataset, feature_name=feature_name)
-    dataset.features[feature_name] = Sequence(ClassLabel(num_classes=len(labels), names=labels))
-    tag2id = {k:i for i, k in enumerate(labels)}
-    dataset = dataset.map(lambda sample: {feature_name: [tag2id[tag] for tag in sample[feature_name]]})
+    class_labels = ClassLabel(names=labels)
+    dataset = dataset.map(lambda sample: {feature_name: [class_labels.str2int(tag) for tag in sample[feature_name]]})
+    dataset = dataset.cast_column(feature_name, Sequence(class_labels))
 
     if logger:
         logger.info(f"{split.upper()} split has {len(dataset)} samples")
@@ -269,9 +312,9 @@ def _make_dataset(
 
 
 @click.option("--output-dir", default=Path(__file__).parent.parent.joinpath("data/output/"), type=click.Path())
-@click.option("--train-path", default=Path(__file__).parent.parent.joinpath("data/input/train.jsonl"), type=click.Path())
-@click.option("--val-path", "--validation-path", default=Path(__file__).parent.parent.joinpath("data/input/validation.jsonl"), type=click.Path())
-@click.option("--test-path", default=Path(__file__).parent.parent.joinpath("data/input/test.jsonl"), type=click.Path())
+@click.option("--train-path", default=Path(__file__).parent.parent.joinpath("data/input/train"), type=click.Path())
+@click.option("--val-path", "--validation-path", default=Path(__file__).parent.parent.joinpath("data/input/validation"), type=click.Path())
+@click.option("--test-path", default=Path(__file__).parent.parent.joinpath("data/input/test"), type=click.Path())
 @click.option("--limit", default=None, type=int)
 @click.option("--char-mean", default=50, type=int)
 @click.option("--char-std", default=5, type=int)

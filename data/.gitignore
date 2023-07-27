@@ -1,3 +1,2 @@
-/output/train/*
-/output/validation/*
-/output/test/*
+input/*
+output/*

@@ -13,13 +13,12 @@ torch = "^1.10.2"
 torchtext = "^0.13"
 datasets = "^2.4.0"
 transformers = "^4.22.1"
-mlflow = {extras = ["s3"], version = "^1.29.0"}
-boto3 = "^1.24.80"
-meowlflow = {git = "https://github.com/connylabs/meowlflow.git", rev = "main"}
+# meowlflow = {git = "https://github.com/connylabs/meowlflow.git", rev = "main"}
 spacy = "^3.4.2"
 protobuf = "^3.20"
 Faker = "^15.1.1"
 seqeval = "^1.2.2"
+accelerate = "^0.21.0"
 
 
 [tool.poetry.dev-dependencies]

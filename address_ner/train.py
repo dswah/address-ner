@@ -10,7 +10,6 @@ from transformers import AutoModelForTokenClassification, TrainingArguments, Tra
 from datasets import load_metric, ClassLabel, Sequence
 import numpy as np
 
-from address_ner import mlflow_logger
 from address_ner.logger import get_logger
 from address_ner.utils import metric, task, compute_metrics, compute_metrics_summary, evaluate, tokenize_and_align_labels
 from address_ner import eval
