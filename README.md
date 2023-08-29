@@ -1,3 +1,14 @@
+---
+license: apache-2.0
+datasets:
+- oscar-corpus/OSCAR-2301
+language:
+- de
+metrics:
+- f1
+library_name: transformers
+pipeline_tag: token-classification
+---
 # address-ner
 
 ## Address NER for Legal German Text
